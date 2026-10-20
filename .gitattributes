@@ -1,0 +1,2 @@
+/packages/wasm_run/native/** text eol=lf
+/packages/wasm_run/native_release.json text eol=lf

@@ -26,6 +26,9 @@ dependencies:
   collection: ^1.17.0
   web: ^1.1.1
   build_rust_binaries: ^0.1.0
+  crypto: ^3.0.7
+  hooks: ^1.0.3
+  code_assets: ^1.0.0
 
 dev_dependencies:
   ffigen: ^20.1.1

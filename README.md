@@ -523,3 +523,44 @@ dart run wasm_wit_component:generate your_package_wasm/wit/your-package.wit lib/
 ```
 
 ### Loading and Testing the Dart Library
+
+## OronBox native releases
+
+The patched `wasm_run` package consumes precompiled native libraries at build time.
+`packages/wasm_run/native_release.json` pins the release tag. The build hook checks
+its source fingerprint, exact target/backend, SHA-256, size and executable format.
+Verified artifacts are cached in the hook output directory. Failed downloads do
+not silently start a Rust build. For local Rust changes, explicitly set
+`WASM_RUN_BUILD_FROM_SOURCE=1` before building the consuming application.
+
+`publish-release.yaml` builds Android arm64/armv7/x64, Windows x64, Linux x64/arm64,
+macOS arm64/x64, iOS arm64 and both simulator architectures. Linux targets use
+Ubuntu 22.04/glibc 2.35; Android uses API 24 and 16 KB load-segment alignment.
+The backend selection matches the source hook. Apple libraries are per-target
+Mach-O dylibs; Flutter native-assets tooling wraps/signs iOS libraries as frameworks
+when packaging the application.
+
+A manual workflow run builds and validates artifacts without publishing. A pushed
+`wasm_run-v*` tag must match `native_release.json`; all eleven targets must succeed
+before the manifest and binaries are released. The workflow requires only the
+repository `GITHUB_TOKEN` with contents write permission in the release job.
+Existing tags must not be moved or overwritten. The initial pending release
+configuration names `wasm_run-v0.2.0-ob-patch.3`; it is not assumed to exist yet.
+
+Local checks:
+
+```sh
+python3 scripts/test_native_release.py
+WASM_RUN_BUILD_FROM_SOURCE=1 dart test packages/wasm_run/test/precompiled_test.dart packages/wasm_run/test/native_library_test.dart
+```
+
+Source edits intentionally invalidate the published binary fingerprint. For a new
+release, update the configured tag, commit the sources, verify a manual matrix run,
+and publish that exact commit under the new tag. Consumers should stay on the
+previous published dependency until the new release is available.
+
+The release workflow runs downloader tests in an isolated temporary Dart package,
+so those tests do not trigger native build hooks or a Rust build.
+
+Native source fingerprints normalize CRLF to LF on both producer and consumer.
+Artifact SHA-256 checks still cover the exact binary bytes.

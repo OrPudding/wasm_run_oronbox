@@ -1,47 +1,114 @@
-name: Publish Release(s)
-
+name: Native libraries
 on:
   push:
-    tags:
-      - "wasm_run-v*"
-
-env:
-  MELOS_VERSION: "3.1.0"
-
+    tags: ['wasm_run-v*']
+  workflow_dispatch:
 permissions:
-  contents: write
-  discussions: write
-
+  contents: read
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  publish_github_release:
-    # macOS because we can cross-compile to all other platforms from it
-    runs-on: macos-latest
-
+  check_hook:
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
-      - uses: subosito/flutter-action@v2
-      - run: dart pub global activate melos ${{ env.MELOS_VERSION }} && melos bs
-      - uses: mlugg/setup-zig@v2
-      - uses: KyleMayes/install-llvm-action@v2
+      - uses: actions/checkout@v7
         with:
-          version: "15"
+          persist-credentials: false
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: python3 scripts/test_native_release.py
+      - name: Check downloader without compiling Rust
+        run: |
+          CHECK_DIR=$(mktemp -d)
+          trap 'rm -rf "$CHECK_DIR"' EXIT
+          cat > "$CHECK_DIR/pubspec.yaml" <<'SPEC'
+          name: wasm_native_release_check
+          environment:
+            sdk: ^3.10.0
+          dev_dependencies:
+            test: ^1.30.0
+            crypto: ^3.0.7
+          SPEC
+          cd "$CHECK_DIR"
+          dart pub get
+          dart test "$GITHUB_WORKSPACE/packages/wasm_run/test/precompiled_test.dart" "$GITHUB_WORKSPACE/packages/wasm_run/test/native_library_test.dart"
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-22.04, target: aarch64-linux-android}
+          - {runner: ubuntu-22.04, target: armv7-linux-androideabi}
+          - {runner: ubuntu-22.04, target: x86_64-linux-android}
+          - {runner: windows-latest, target: x86_64-pc-windows-msvc}
+          - {runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu}
+          - {runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, container: 'ubuntu:22.04'}
+          - {runner: macos-latest, target: aarch64-apple-darwin}
+          - {runner: macos-latest, target: x86_64-apple-darwin}
+          - {runner: macos-latest, target: aarch64-apple-ios}
+          - {runner: macos-latest, target: aarch64-apple-ios-sim}
+          - {runner: macos-latest, target: x86_64-apple-ios}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    steps:
+      - name: Install ARM Linux build tools
+        if: matrix.container != ''
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git build-essential python3 pkg-config clang
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          components: rustfmt
-      - run: cargo install cargo-wasi
-      - uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27d
-
-      - name: Build all library binaries
-        run: melos run build
-      - name: Build wasm component
+          targets: ${{ matrix.target }}
+      - name: Build library
+        shell: bash
+        env:
+          NATIVE_TARGET: ${{ matrix.target }}
         run: |
-          cp packages/dart_wit_component/wasm_wit_component/lib/dart_wit_component.wasm platform-build/dart_wit_component.wasm
-          cp packages/dart_wit_component/wit/dart-wit-generator.wit platform-build/dart-wit-component.wit
-
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v1
+          if [[ "$NATIVE_TARGET" == *android* ]]; then
+            export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          fi
+          PYTHON=python3
+          if [[ "$RUNNER_OS" == Windows ]]; then PYTHON=python; fi
+          "$PYTHON" scripts/native_release.py build "$NATIVE_TARGET" platform-build
+      - uses: actions/upload-artifact@v7
         with:
-          files: platform-build/*
+          name: native-${{ matrix.target }}
+          path: platform-build/*
+          if-no-files-found: error
+  release:
+    needs: [build, check_hook]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: platform-build
+      - name: Assemble verified manifest
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
+        run: |
+          TAG=$(python3 -c 'import json; print(json.load(open("packages/wasm_run/native_release.json"))["tag"])')
+          if [ "$GITHUB_REF_TYPE" = tag ]; then test "$RELEASE_REF" = "$TAG"; fi
+          python3 scripts/native_release.py manifest platform-build "$TAG"
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" platform-build/*.so platform-build/*.dll platform-build/*.dylib platform-build/manifest.json platform-build/SHA256SUMS --verify-tag --title "$RELEASE_TAG" --notes "Precompiled native libraries for OronBox"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-release-manifest
+          path: |
+            platform-build/manifest.json
+            platform-build/SHA256SUMS
